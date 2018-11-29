@@ -1,0 +1,61 @@
+import pandas as pd
+from dbfread import DBF
+from bs4 import BeautifulSoup
+import requests
+
+dollar = 65.5906 # курс, установленный 29.09.2018
+
+cbr_file_1809 = 'PC8051809.dbf' # отчет о кредитах банков зарубежным странам по состоянию на 01.10.2018
+# отчетность взята из формы 0409805 отсюда http://www.cbr.ru/credit/forms/
+
+bank_register = 'https://www.cbr.ru/credit/GetAsXML.asp' # Справочник по кредитным организациям  
+
+def parse_bank_register(): # из справочника нужно получить код банка и название
+    page = requests.get(bank_register)
+    page.encoding = 'cp1251'
+    banks = BeautifulSoup(page.text, 'lxml').find_all('bnk')
+    result = []
+    for bank in banks:
+        name = bank['name']
+        code = bank['rgn']
+        result.append({'bank' : name, 'REGN_GKO' : code})
+    return pd.DataFrame(result)
+
+bank_register = parse_bank_register()
+
+# ОКСМ с портала открытых данных https://data.mos.ru/classifier/7710168515-obshcherossiyskiy-klassifikator-stran-mira
+oksm = pd.read_csv('oksm.csv', encoding='cp1251', sep=';', dtype='str')[['CODE', 'SHORTNAME']] 
+oksm.columns = ['KSTRAN', 'SHORTNAME']
+
+data_1809 = DBF(cbr_file_1809) # чтение файла с сайта ЦБ
+data_1809 = pd.DataFrame(iter(data_1809))
+
+df_1809 = data_1809.merge(oksm, on = 'KSTRAN', how = 'outer') # сопоставление кодов стран и названий стран
+df_1809 = df_1809.dropna(subset = ['REGN_GKO'])
+df_1809.REGN_GKO = df_1809.REGN_GKO.astype("int64")
+df_1809.REGN_GKO = df_1809.REGN_GKO.astype("str")
+df_1809.STR = df_1809.STR.astype('int')
+
+df_1809 = df_1809.merge(bank_register, on = 'REGN_GKO', how = 'outer') # сопоставление кодов банков и названий банков
+df_1809 = df_1809.dropna(subset = ['STR'])
+df_1809 = df_1809[df_1809.STR != 999]
+
+df_1809 = df_1809[['bank', 'SHORTNAME', 'NAC_NAD', 'TREB']] # только нужные столбцы
+df_1809.columns = ['bank', 'country', 'charge', 'rub_mln']
+df_1809.rub_mln = df_1809.rub_mln / 1000
+
+borrowers = df_1809.groupby('country', as_index=False).sum().sort_values('rub_mln', ascending= False)[['country', 'rub_mln']]
+borrowers['$_mln'] = borrowers.rub_mln / dollar
+
+bank_foreign_credits = df_1809[df_1809.country != 'РОССИЯ'].groupby('bank', as_index=False).sum().sort_values('rub_mln', 
+                                                            ascending = False)[['bank', 'rub_mln']]
+bank_foreign_credits['$_mln'] = bank_foreign_credits.rub_mln / dollar
+
+ukraine = df_1809[df_1809.country == 'УКРАИНА'].sort_values('rub_mln', ascending = False)[['bank', 'charge', 'rub_mln']]
+
+# сохранить все полученные данные
+
+df_1809.to_csv('Все заемщики в иностранных государствах во всех банках на 1 октября.csv', index = False)
+borrowers.to_csv('Страны-заемщики у российских банков.csv', index = False)
+bank_foreign_credits.to_csv('Банки по сумме для иностранных заемщиков.csv', index = False)
+ukraine.to_csv('Кредитные требования к Украине.csv', index = False)
